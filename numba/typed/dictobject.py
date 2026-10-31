@@ -24,6 +24,7 @@ from numba.core.imputils import iternext_impl, impl_ret_untracked
 from numba.core import types, cgutils
 from numba.core.types import (
     DictType,
+    FrozenDictType,
     DictItemsIterableType,
     DictKeysIterableType,
     DictValuesIterableType,
@@ -86,6 +87,7 @@ def new_dict(key, value, n_keys=0):
 
 
 @register_model(DictType)
+@register_model(FrozenDictType)
 class DictModel(models.StructModel):
     def __init__(self, dmm, fe_type):
         members = [
@@ -175,6 +177,31 @@ def _from_meminfo(typingctx, mi, dicttyperef):
         )
 
     sig = dicttype(mi, dicttyperef)
+    return sig, codegen
+
+
+@intrinsic
+def _dict_as_frozen(typingctx, dctobj):
+    """Reinterpret a mutable Dict value as a FrozenDict value.
+
+    The caller is responsible for passing in an owned, private copy so that
+    no other reference can mutate it.  No data is copied here and the
+    reference ownership is transferred to the returned value.
+    """
+    if type(dctobj) is not DictType:
+        raise TypingError(
+            'expected *dctobj* to be a mutable DictType, got {}'
+            .format(dctobj),
+        )
+
+    resty = FrozenDictType(dctobj.key_type, dctobj.value_type)
+    sig = resty(dctobj)
+
+    def codegen(context, builder, sig, args):
+        return impl_ret_borrowed(
+            context, builder, sig.return_type, args[0],
+        )
+
     return sig, codegen
 
 
@@ -703,11 +730,19 @@ def impl_len_iters(d):
     return impl
 
 
+def _sentry_frozen_mutation(d, op):
+    if isinstance(d, FrozenDictType):
+        raise TypingError(
+            f"Cannot {op} a FrozenDictType: frozen dictionaries are "
+            "read-only snapshots. Call .copy() to obtain a mutable Dict.")
+
+
 @overload_method(types.DictType, '__setitem__')
 @overload(operator.setitem)
 def impl_setitem(d, key, value):
     if not isinstance(d, types.DictType):
         return
+    _sentry_frozen_mutation(d, "assign an item in")
 
     keyty, valty = d.key_type, d.value_type
 
@@ -788,6 +823,7 @@ def impl_getitem(d, key):
 def impl_popitem(d):
     if not isinstance(d, types.DictType):
         return
+    _sentry_frozen_mutation(d, "pop an item from")
 
     def impl(d):
         status, keyval = _dict_popitem(d)
@@ -805,6 +841,7 @@ def impl_popitem(d):
 def impl_pop(dct, key, default=None):
     if not isinstance(dct, types.DictType):
         return
+    _sentry_frozen_mutation(dct, "pop an item from")
 
     keyty = dct.key_type
     valty = dct.value_type
@@ -835,6 +872,7 @@ def impl_pop(dct, key, default=None):
 def impl_delitem(d, k):
     if not isinstance(d, types.DictType):
         return
+    _sentry_frozen_mutation(d, "delete an item from")
 
     def impl(d, k):
         d.pop(k)
@@ -859,6 +897,7 @@ def impl_contains(d, k):
 def impl_clear(d):
     if not isinstance(d, types.DictType):
         return
+    _sentry_frozen_mutation(d, "clear")
 
     def impl(d):
         while len(d):
@@ -887,6 +926,7 @@ def impl_copy(d):
 def impl_setdefault(dct, key, default=None):
     if not isinstance(dct, types.DictType):
         return
+    _sentry_frozen_mutation(dct, "set a default item on")
 
     def impl(dct, key, default=None):
         if key not in dct:
@@ -934,6 +974,7 @@ def impl_values(d):
 def ol_dict_update(d, other):
     if not isinstance(d, types.DictType):
         return
+    _sentry_frozen_mutation(d, "update")
     if not isinstance(other, types.DictType):
         return
 
@@ -1019,6 +1060,7 @@ def impl_iterable_getiter(context, builder, sig, args):
 
 
 @lower_builtin('getiter', types.DictType)
+@lower_builtin('getiter', types.FrozenDictType)
 def impl_dict_getiter(context, builder, sig, args):
     """Implement iter(Dict).  Semantically equivalent to dict.keys()
     """

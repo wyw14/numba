@@ -3,6 +3,8 @@ import importlib
 
 _delayed_symbols = {
     "Dict": ".typeddict",
+    "FrozenDict": ".typeddict",
+    "freeze": ".typeddict",
     "List": ".typedlist",
     "Set": ".typedset",
 }

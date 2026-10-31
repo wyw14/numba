@@ -768,8 +768,9 @@ class DictType(IterableType, InitialValue):
         """
         Unify this with the *other* dictionary.
         """
-        # If other is dict
-        if isinstance(other, DictType):
+        # If other is dict.  FrozenDictType is intentionally excluded:
+        # mutable and frozen dictionaries never unify implicitly.
+        if type(other) is DictType:
             if not other.is_precise():
                 return self
             else:
@@ -795,6 +796,34 @@ class DictType(IterableType, InitialValue):
 
     def __repr__(self):
         return f"DictType({self.key_type}, {self.value_type})"
+
+
+class FrozenDictType(DictType):
+    """Type of a read-only dictionary snapshot created by ``freeze()``.
+
+    A frozen dictionary supports lookup, containment checks, ``len`` and
+    insertion-ordered iteration, but cannot be mutated: mutating operations
+    are rejected at compile time.  A ``FrozenDictType`` never unifies with a
+    mutable ``DictType``.
+    """
+
+    mutable = False
+
+    def unify(self, typingctx, other):
+        # Only another, identically-typed frozen dictionary can unify.
+        if type(other) is not FrozenDictType:
+            return
+        if not other.is_precise():
+            return self
+        if (self.key_type == other.key_type and
+                self.value_type == other.value_type):
+            return FrozenDictType(self.key_type, self.value_type)
+
+    def __unliteral__(self):
+        return FrozenDictType(self.key_type, self.value_type)
+
+    def __repr__(self):
+        return f"FrozenDictType({self.key_type}, {self.value_type})"
 
 
 class LiteralStrKeyDict(Literal, ConstSized, Hashable):

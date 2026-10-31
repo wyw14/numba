@@ -1,13 +1,15 @@
 """
 Python wrapper that connects CPython interpreter to the numba dictobject.
 """
+from types import MappingProxyType
 from collections.abc import MutableMapping, Iterable, Mapping
-from numba.core.types import DictType
+from numba.core.types import DictType, FrozenDictType
 from numba.core.imputils import numba_typeref_ctor
 from numba import njit, typeof
 from numba.core import types, errors, config, cgutils
 from numba.core.extending import (
     overload,
+    overload_method,
     box,
     unbox,
     NativeValue,
@@ -16,6 +18,28 @@ from numba.core.extending import (
 )
 from numba.typed import dictobject
 from numba.core.typing import signature
+
+
+_FROZEN_READONLY_MSG = (
+    "'FrozenDict' object is read-only; use d.copy() to obtain a mutable "
+    "numba.typed.Dict"
+)
+
+
+def _sentry_freeze_eligible_type(ty, role, exc):
+    if isinstance(ty, (types.Number, types.Boolean, types.UnicodeType)):
+        return
+    if isinstance(ty, types.BaseTuple):
+        for i, elem in enumerate(ty.types):
+            _sentry_freeze_eligible_type(elem, f"{role} tuple element #{i}",
+                                         exc)
+        return
+    raise exc(
+        f"Cannot freeze a dictionary with {role} of type {ty}: only "
+        "immutable scalars (bool, int, float, complex, str) and tuples "
+        "thereof are supported; mutable values (e.g. arrays) are not "
+        "deep-frozen"
+    )
 
 
 @njit
@@ -76,6 +100,11 @@ def _copy(d):
 
 def _from_meminfo_ptr(ptr, dicttype):
     d = Dict(meminfo=ptr, dcttype=dicttype)
+    return d
+
+
+def _frozen_from_meminfo_ptr(ptr, dicttype):
+    d = FrozenDict(meminfo=ptr, dcttype=dicttype)
     return d
 
 
@@ -237,6 +266,159 @@ class Dict(MutableMapping):
     def copy(self):
         return _copy(self)
 
+    def freeze(self):
+        """Return an immutable, isolated snapshot of this dictionary.
+
+        See :func:`numba.typed.freeze`.
+        """
+        return freeze(self)
+
+
+class FrozenDict(Mapping):
+    """A read-only snapshot of a homogeneous :class:`Dict`.
+
+    Instances are created with :func:`freeze` (or ``Dict.freeze``).  The
+    snapshot is an isolated copy: later mutations of the source dictionary
+    do not affect it.  Lookup, ``get``, ``in``, ``len`` and insertion-ordered
+    iteration are supported from both Python and compiled functions; every
+    mutating operation raises ``TypeError``.
+    """
+
+    def __new__(cls, dcttype=None, meminfo=None):
+        if config.DISABLE_JIT:
+            return MappingProxyType({})
+        return object.__new__(cls)
+
+    def __init__(self, *, dcttype=None, meminfo=None):
+        if not isinstance(dcttype, FrozenDictType):
+            raise TypeError('*dcttype* must be a FrozenDictType')
+        if meminfo is None:
+            raise TypeError(
+                'FrozenDict cannot be constructed directly; use freeze()')
+        self._dict_type = dcttype
+        self._opaque = meminfo
+
+    @property
+    def _numba_type_(self):
+        return self._dict_type
+
+    @property
+    def _typed(self):
+        return True
+
+    def __getitem__(self, key):
+        return _getitem(self, key)
+
+    def __iter__(self):
+        return iter(_iter(self))
+
+    def __len__(self):
+        return _length(self)
+
+    def __contains__(self, key):
+        return _contains(self, key)
+
+    def __str__(self):
+        buf = []
+        for k, v in self.items():
+            buf.append("{}: {}".format(k, v))
+        return '{{{0}}}'.format(', '.join(buf))
+
+    def __repr__(self):
+        body = str(self)
+        prefix = str(self._dict_type)
+        return "{prefix}({body})".format(prefix=prefix, body=body)
+
+    def get(self, key, default=None):
+        return _get(self, key, default)
+
+    def copy(self):
+        return _copy(self)
+
+    def __setitem__(self, key, value):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def __delitem__(self, key):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def pop(self, *args):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def popitem(self):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def clear(self):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def update(self, *args, **kwargs):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+    def setdefault(self, *args):
+        raise TypeError(_FROZEN_READONLY_MSG)
+
+
+def freeze(d):
+    """Return a read-only snapshot of the typed dictionary *d*.
+
+    The snapshot copies *d* and can be read from both Python and compiled
+    functions.  Later mutations of *d* are not visible through the snapshot.
+    Only immutable scalar keys/values (bool, int, float, complex, str) and
+    tuples thereof are accepted; mutable values such as arrays are rejected
+    as they cannot be deep-frozen.
+
+    Returns
+    -------
+    FrozenDict
+    """
+    if config.DISABLE_JIT:
+        return MappingProxyType(dict(d))
+    if isinstance(d, FrozenDict):
+        return d
+    if not isinstance(d, Dict):
+        raise TypeError(
+            "freeze() expects a numba.typed.Dict, got {}".format(type(d)))
+    if not d._typed:
+        raise TypeError(
+            "cannot freeze an untyped dictionary; create it with "
+            "Dict.empty(key_type, value_type) first")
+    _sentry_freeze_eligible_type(d._dict_type.key_type, 'keys', TypeError)
+    _sentry_freeze_eligible_type(d._dict_type.value_type, 'values',
+                                 TypeError)
+    return _freeze(d)
+
+
+@overload(freeze)
+def impl_freeze(d):
+    if isinstance(d, types.FrozenDictType):
+        return lambda d: d
+    if not isinstance(d, types.DictType):
+        return
+    _sentry_freeze_eligible_type(d.key_type, 'keys', errors.TypingError)
+    _sentry_freeze_eligible_type(d.value_type, 'values', errors.TypingError)
+
+    def impl(d):
+        return dictobject._dict_as_frozen(d.copy())
+
+    return impl
+
+
+@overload_method(types.DictType, 'freeze')
+def impl_dict_freeze(d):
+    if isinstance(d, types.FrozenDictType):
+        return lambda d: d
+    _sentry_freeze_eligible_type(d.key_type, 'keys', errors.TypingError)
+    _sentry_freeze_eligible_type(d.value_type, 'values', errors.TypingError)
+
+    def impl(d):
+        return dictobject._dict_as_frozen(d.copy())
+
+    return impl
+
+
+@njit
+def _freeze(d):
+    return freeze(d)
+
 
 @overload_classmethod(types.DictType, 'empty')
 def typeddict_empty(cls, key_type, value_type, n_keys=0):
@@ -249,8 +431,7 @@ def typeddict_empty(cls, key_type, value_type, n_keys=0):
     return impl
 
 
-@box(types.DictType)
-def box_dicttype(typ, val, c):
+def _box_dicttype(typ, val, c, from_meminfo_name):
     context = c.context
     builder = c.builder
 
@@ -267,7 +448,7 @@ def box_dicttype(typ, val, c):
         c.builder.module, 'numba.typed.typeddict',
     )
     typeddict_mod = c.pyapi.import_module(modname)
-    fmp_fn = c.pyapi.object_getattr_string(typeddict_mod, '_from_meminfo_ptr')
+    fmp_fn = c.pyapi.object_getattr_string(typeddict_mod, from_meminfo_name)
 
     dicttype_obj = c.pyapi.unserialize(c.pyapi.serialize_object(typ))
 
@@ -284,12 +465,21 @@ def box_dicttype(typ, val, c):
     return builder.load(result_var)
 
 
-@unbox(types.DictType)
-def unbox_dicttype(typ, val, c):
+@box(types.DictType)
+def box_dicttype(typ, val, c):
+    return _box_dicttype(typ, val, c, '_from_meminfo_ptr')
+
+
+@box(types.FrozenDictType)
+def box_frozen_dicttype(typ, val, c):
+    return _box_dicttype(typ, val, c, '_frozen_from_meminfo_ptr')
+
+
+def _unbox_dicttype(typ, val, c, py_dict_cls):
     context = c.context
 
-    # Check that `type(val) is Dict`
-    dict_type = c.pyapi.unserialize(c.pyapi.serialize_object(Dict))
+    # Check that `type(val) is py_dict_cls`
+    dict_type = c.pyapi.unserialize(c.pyapi.serialize_object(py_dict_cls))
     valtype = c.pyapi.object_type(val)
     same_type = c.builder.icmp_unsigned("==", valtype, dict_type)
 
@@ -343,6 +533,16 @@ def unbox_dicttype(typ, val, c):
     return NativeValue(dctobj_res, is_error=is_error_res)
 
 
+@unbox(types.DictType)
+def unbox_dicttype(typ, val, c):
+    return _unbox_dicttype(typ, val, c, Dict)
+
+
+@unbox(types.FrozenDictType)
+def unbox_frozen_dicttype(typ, val, c):
+    return _unbox_dicttype(typ, val, c, FrozenDict)
+
+
 @type_callable(DictType)
 def typeddict_call(context):
     """
@@ -352,8 +552,12 @@ def typeddict_call(context):
     def typer(arg=None):
         if arg is None:
             return types.DictType(types.undefined, types.undefined)
-        elif isinstance(arg, types.DictType):
+        elif type(arg) is types.DictType:
             return arg
+        elif isinstance(arg, types.FrozenDictType):
+            raise errors.TypingError(
+                "cannot construct a mutable Dict from a FrozenDictType; "
+                "use .copy() in compiled code")
         elif isinstance(arg, types.Tuple) and len(arg) == 0:  # Dict(())
             msg = "non-precise type 'dict(())'"
             raise errors.TypingError(msg)
