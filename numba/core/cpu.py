@@ -108,8 +108,9 @@ class CPUContext(BaseContext):
         rtsys.initialize(self)
 
         # Add implementations that work via import
-        from numba.cpython import (builtins, charseq, enumimpl, # noqa F401
-                                   hashing, heapq, iterators, # noqa F401
+        from numba.cpython import (bisect, builtins, charseq, # noqa F401
+                                   enumimpl, hashing, heapq, # noqa F401
+                                   iterators, # noqa F401
                                    listobj, numbers, rangeobj, # noqa F401
                                    setobj, slicing, tupleobj, # noqa F401
                                    unicode,) # noqa F401

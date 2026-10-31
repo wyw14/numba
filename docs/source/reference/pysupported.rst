@@ -1269,6 +1269,40 @@ startup with entropy drawn from the operating system.
    Numba also supports most additional distributions from the :ref:`Numpy
    random module <numpy-random>`.
 
+``bisect``
+----------
+
+The :func:`bisect.bisect_left` and :func:`bisect.bisect_right` functions from
+the :mod:`bisect` module are supported in :term:`nopython mode`.  They locate
+the left and right insertion points for *x* in an ordered container *a* using
+the ``<`` operator, and return the same index as the Python :mod:`bisect`
+module.  The container is not modified and it is not checked for ordering.
+
+The supported containers are:
+
+* a :class:`numba.typed.List` holding numeric or unicode string elements
+* a one-dimensional numeric Numpy array (including non-contiguous views)
+
+The optional *lo* and *hi* arguments bound the half-open search interval
+``[lo, hi)`` and may be omitted, passed positionally, or passed as keyword
+arguments; *hi* defaults to ``len(a)``.  An empty interval (``lo == hi``)
+returns *lo*.  A negative *lo*, or a bound outside the range of the container,
+raises :class:`ValueError` at runtime.  The *key* parameter is not supported
+and, together with unsupported containers or incomparable elements, produces a
+typing error at compile time.
+
+.. code-block:: python
+
+   import bisect
+   import numpy as np
+   from numba import njit
+
+   @njit
+   def index(a, x):
+       return bisect.bisect_left(a, x), bisect.bisect_right(a, x)
+
+   print(index(np.array([1, 2, 2, 3]), 2))   # (1, 3)
+
 ``heapq``
 ---------
 

@@ -1,0 +1,8 @@
+``bisect.bisect_left`` and ``bisect.bisect_right`` support
+----------------------------------------------------------
+
+``bisect.bisect_left`` and ``bisect.bisect_right`` are now supported in
+nopython mode on a :class:`numba.typed.List` of numeric or unicode values and
+on a one-dimensional numeric Numpy array. The ``lo`` and ``hi`` arguments can
+be omitted or specified, the ``key`` parameter is not supported, and the
+container is checked neither for ordering nor modified.

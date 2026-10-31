@@ -55,6 +55,7 @@ class TestNumbaImport(TestCase):
         # doing 'import numba' or 'from numba import njit'
         banlist = ['numba.cpython.slicing',
                    'numba.cpython.tupleobj',
+                   'numba.cpython.bisect',
                    'numba.cpython.enumimpl',
                    'numba.cpython.hashing',
                    'numba.cpython.heapq',
