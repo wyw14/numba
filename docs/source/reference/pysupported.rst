@@ -852,6 +852,34 @@ range of possible failures. However, the dictionary can be safely read from
 multiple threads as long as the contents of the dictionary do not
 change during the parallel access.
 
+Batch lookup
+''''''''''''
+
+``numba.typed.Dict`` provides a ``lookup_many(keys, default)`` method for
+looking up a 1-D array of keys in one call.  It returns a tuple
+``(values, found)`` where ``values`` is an array with the same length as
+``keys`` and the value dtype of the dictionary, and ``found`` is a boolean
+array.  Missing keys yield ``default`` and are not inserted into the
+dictionary.  The order of ``keys`` (including duplicates and non-contiguous
+views) is preserved, and an empty ``keys`` array still returns correctly
+typed empty arrays.  The dictionary values must be numeric scalars; both
+``keys`` elements and ``default`` must be safely convertible to the
+dictionary key and value types respectively.  The method is available both
+in interpreted code and inside JIT-compiled functions::
+
+  In [1]: import numpy as np
+
+  In [2]: from numba import int32, float64
+
+  In [3]: from numba.typed import Dict
+
+  In [4]: d = Dict.empty(int32, float64)
+
+  In [5]: d[1] = 10.0; d[4] = 40.0
+
+  In [6]: d.lookup_many(np.array([4, 9, 1], dtype=np.int32), -1.0)
+  Out[6]: (array([40., -1., 10.]), array([ True, False,  True]))
+
 Dictionary comprehension
 ''''''''''''''''''''''''
 

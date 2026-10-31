@@ -1,0 +1,10 @@
+``numba.typed.Dict.lookup_many`` batch lookup
+----------------------------------------------
+
+``numba.typed.Dict`` gains a ``lookup_many(keys, default)`` method that looks
+up a 1-D array of keys in one call and returns ``(values, found)``: an array
+of values with the dictionary value dtype and a boolean array of hit flags.
+Missing keys yield ``default`` without inserting into the dictionary, the
+input key order (including duplicates and non-contiguous views) is preserved,
+and empty key arrays still return correctly typed results. The method works in
+both interpreted code and JIT-compiled functions.

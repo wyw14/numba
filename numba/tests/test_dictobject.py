@@ -1007,6 +1007,194 @@ class TestDictObject(MemoryLeakMixin, TestCase):
 
         self.assertTrue(foo())
 
+    def test_dict_lookup_many(self):
+        @njit
+        def foo(keys, default):
+            d = dictobject.new_dict(int32, float32)
+            d[1] = 1.5
+            d[2] = 2.5
+            d[4] = 4.5
+            return d.lookup_many(keys, default)
+
+        keys = np.array([2, 9, 1, 1, 4], dtype=np.int32)
+        values, found = foo(keys, np.float32(-1.0))
+        self.assertEqual(values.dtype, np.float32)
+        self.assertEqual(found.dtype, np.bool_)
+        np.testing.assert_array_equal(
+            values, np.array([2.5, -1.0, 1.5, 1.5, 4.5], dtype=np.float32))
+        np.testing.assert_array_equal(
+            found, np.array([True, False, True, True, True]))
+
+    def test_dict_lookup_many_dtype_from_dict_not_default(self):
+        # The output dtype is the dict value dtype even if the first queried
+        # key is missing and the default has a wider dtype.
+        @njit
+        def foo(keys, default):
+            d = dictobject.new_dict(int32, float32)
+            d[1] = 1.5
+            return d.lookup_many(keys, default)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            values, found = foo(np.array([9, 1], dtype=np.int32), -1.0)
+        self.assertEqual(values.dtype, np.float32)
+        np.testing.assert_array_equal(values, np.array([-1.0, 1.5],
+                                                       dtype=np.float32))
+        np.testing.assert_array_equal(found, np.array([False, True]))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            values, found = foo(np.array([9, 8], dtype=np.int32), -2.0)
+        self.assertEqual(values.dtype, np.float32)
+        np.testing.assert_array_equal(values, np.array([-2.0, -2.0],
+                                                       dtype=np.float32))
+        np.testing.assert_array_equal(found, np.array([False, False]))
+
+    def test_dict_lookup_many_empty_keys(self):
+        @njit
+        def foo(keys, default):
+            d = dictobject.new_dict(int64, int32)
+            d[1] = 2
+            return d.lookup_many(keys, default)
+
+        values, found = foo(np.empty(0, dtype=np.int64), np.int32(0))
+        self.assertEqual(values.shape, (0,))
+        self.assertEqual(values.dtype, np.int32)
+        self.assertEqual(found.shape, (0,))
+        self.assertEqual(found.dtype, np.bool_)
+
+    def test_dict_lookup_many_non_contiguous(self):
+        @njit
+        def foo(keys, default):
+            d = dictobject.new_dict(int32, float64)
+            d[2] = 20.0
+            d[5] = 50.0
+            d[8] = 80.0
+            return d.lookup_many(keys, default)
+
+        base = np.arange(1, 10, dtype=np.int32).reshape(3, 3)
+        keys = base[:, 1]
+        self.assertFalse(keys.flags.c_contiguous)
+        values, found = foo(keys, np.float64(-1.0))
+        np.testing.assert_array_equal(values, np.array([20., 50., 80.]))
+        np.testing.assert_array_equal(found, np.array([True, True, True]))
+
+        keys = np.arange(-1, 11, dtype=np.int32)[::3]
+        self.assertFalse(keys.flags.c_contiguous)
+        np.testing.assert_array_equal(keys, [-1, 2, 5, 8])
+        values, found = foo(keys, np.float64(-1.0))
+        np.testing.assert_array_equal(values, np.array([-1., 20., 50., 80.]))
+        np.testing.assert_array_equal(found,
+                                      np.array([False, True, True, True]))
+
+    def test_dict_lookup_many_does_not_insert(self):
+        @njit
+        def foo(keys, default):
+            d = dictobject.new_dict(int32, int64)
+            d[1] = 1
+            before = len(d)
+            values, found = d.lookup_many(keys, default)
+            return before, len(d), values, found
+
+        before, after, values, found = foo(
+            np.array([1, 7, 1, 8], dtype=np.int32), np.int64(-1))
+        self.assertEqual(before, after)
+        np.testing.assert_array_equal(values, np.array([1, -1, 1, -1]))
+        np.testing.assert_array_equal(found,
+                                      np.array([True, False, True, False]))
+
+    def test_dict_lookup_many_multiple_dicts(self):
+        @njit
+        def foo(keys1, keys2):
+            da = dictobject.new_dict(int32, float32)
+            db = dictobject.new_dict(int64, int64)
+            da[1] = 1.25
+            da[2] = 2.5
+            db[10] = 100
+            va, fa = da.lookup_many(keys1, np.float32(-1.0))
+            vb, fb = db.lookup_many(keys2, np.int64(-2))
+            return va, fa, vb, fb, len(da), len(db)
+
+        va, fa, vb, fb, la, lb = foo(
+            np.array([1, 3, 2], dtype=np.int32),
+            np.array([10, 11], dtype=np.int64))
+        self.assertEqual(va.dtype, np.float32)
+        self.assertEqual(vb.dtype, np.int64)
+        np.testing.assert_array_equal(va, np.array([1.25, -1., 2.5],
+                                                  dtype=np.float32))
+        np.testing.assert_array_equal(fa, [True, False, True])
+        np.testing.assert_array_equal(vb, np.array([100, -2]))
+        np.testing.assert_array_equal(fb, [True, False])
+        self.assertEqual((la, lb), (2, 1))
+
+    def _check_lookup_many_raises(self, fn, msg):
+        with self.assertRaises(TypingError) as raises:
+            fn()
+        self.assertIn(msg, str(raises.exception))
+
+    def test_dict_lookup_many_bad_args(self):
+        @njit
+        def use_list(d):
+            return d.lookup_many([1, 2], -1)
+
+        @njit
+        def use_2d(d):
+            return d.lookup_many(np.zeros((2, 2), dtype=np.int32), -1)
+
+        @njit
+        def use_no_default(d):
+            return d.lookup_many(np.array([1], dtype=np.int32))
+
+        @njit
+        def use_none_default(d):
+            return d.lookup_many(np.array([1], dtype=np.int32), None)
+
+        @njit
+        def use_complex_default(d):
+            return d.lookup_many(np.array([1], dtype=np.int32), 1j)
+
+        @njit
+        def use_float_keys(d):
+            return d.lookup_many(np.array([1.0]), -1)
+
+        @njit
+        def use_non_numeric_values(keys, default):
+            d = dictobject.new_dict(int32, types.unicode_type)
+            d[1] = "a"
+            return d.lookup_many(keys, default)
+
+        @njit
+        def use_non_numeric_keys(keys, default):
+            d = dictobject.new_dict(types.unicode_type, types.int64)
+            d["a"] = 1
+            return d.lookup_many(keys, default)
+
+        make = njit(lambda: dictobject.new_dict(int32, float64))
+
+        d = make()
+        msg = "dict.lookup_many(keys, default) expects 'keys' to be a 1-D array"
+        self._check_lookup_many_raises(lambda: use_list(d), msg)
+        self._check_lookup_many_raises(lambda: use_2d(d), msg)
+
+        msg = ("dict.lookup_many(keys, default) requires a scalar 'default' "
+               "value")
+        self._check_lookup_many_raises(lambda: use_no_default(d), msg)
+        self._check_lookup_many_raises(lambda: use_none_default(d), msg)
+
+        self._check_lookup_many_raises(
+            lambda: use_complex_default(d),
+            'cannot safely cast complex128 to float64')
+        self._check_lookup_many_raises(
+            lambda: use_float_keys(d),
+            'cannot safely cast float64 to int32')
+        self._check_lookup_many_raises(
+            lambda: use_non_numeric_values(
+                np.array([1], dtype=np.int32), "x"),
+            "numeric scalars that can be stored in a NumPy array")
+        self._check_lookup_many_raises(
+            lambda: use_non_numeric_keys(np.array(["a"]), 0),
+            "supports only numeric scalar key types")
+
     def test_dict_update(self):
         """
         Tests dict.update works with various dictionaries.
@@ -1184,6 +1372,168 @@ class TestTypedDict(MemoryLeakMixin, TestCase):
 
     def test_str(self):
         self.check_stringify(str)
+
+    def test_lookup_many(self):
+        d = Dict.empty(int32, float64)
+        d[1] = 10.0
+        d[2] = 20.0
+        d[4] = 40.0
+        keys = np.array([2, 9, 1, 1, 4], dtype=np.int32)
+        values, found = d.lookup_many(keys, -1.0)
+        self.assertEqual(values.dtype, np.float64)
+        self.assertEqual(found.dtype, np.bool_)
+        np.testing.assert_array_equal(values,
+                                      [20.0, -1.0, 10.0, 10.0, 40.0])
+        np.testing.assert_array_equal(
+            found, [True, False, True, True, True])
+        # missing keys are not inserted
+        self.assertEqual(len(d), 3)
+
+    def test_lookup_many_dtype_from_dict_value_type(self):
+        d = Dict.empty(int32, float32)
+        d[5] = 5.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            values, found = d.lookup_many(
+                np.array([9, 8, 5], dtype=np.int32), -1.0)
+        self.assertEqual(values.dtype, np.float32)
+        np.testing.assert_array_equal(values, np.array([-1., -1., 5.],
+                                                       dtype=np.float32))
+        np.testing.assert_array_equal(found, [False, False, True])
+
+    def test_lookup_many_empty_keys(self):
+        d = Dict.empty(int32, int64)
+        values, found = d.lookup_many(np.empty(0, dtype=np.int32), 0)
+        self.assertEqual(values.shape, (0,))
+        self.assertEqual(values.dtype, np.int64)
+        self.assertEqual(found.shape, (0,))
+        self.assertEqual(found.dtype, np.bool_)
+
+        # an empty typed dict still reports its value dtype
+        empty_d = Dict.empty(int32, float32)
+        values, found = empty_d.lookup_many(
+            np.array([1], dtype=np.int32)[:0], np.float32(0.0))
+        self.assertEqual(values.dtype, np.float32)
+        self.assertEqual(found.dtype, np.bool_)
+        self.assertEqual(len(empty_d), 0)
+
+    def test_lookup_many_non_contiguous(self):
+        d = Dict.empty(int32, float64)
+        d[2] = 20.0
+        d[5] = 50.0
+        d[8] = 80.0
+        keys = np.arange(1, 10, dtype=np.int32).reshape(3, 3)[:, 1]
+        self.assertFalse(keys.flags.c_contiguous)
+        values, found = d.lookup_many(keys, -1.0)
+        np.testing.assert_array_equal(values, [20.0, 50.0, 80.0])
+        np.testing.assert_array_equal(found, [True, True, True])
+
+        keys = np.arange(-1, 11, dtype=np.int32)[::3]
+        values, found = d.lookup_many(keys, -1.0)
+        np.testing.assert_array_equal(values, [-1.0, 20.0, 50.0, 80.0])
+        np.testing.assert_array_equal(found, [False, True, True, True])
+
+    def test_lookup_many_all_missing(self):
+        d = Dict.empty(int32, int32)
+        d[1] = 1
+        keys = np.array([2, 3, 4], dtype=np.int32)
+        values, found = d.lookup_many(keys, np.int32(-7))
+        self.assertEqual(values.dtype, np.int32)
+        np.testing.assert_array_equal(values, [-7, -7, -7])
+        np.testing.assert_array_equal(found, [False, False, False])
+        self.assertEqual(len(d), 1)
+
+    def test_lookup_many_duplicates(self):
+        d = Dict.empty(int32, int64)
+        d[1] = 11
+        d[2] = 22
+        keys = np.array([1, 1, 3, 2, 3, 1], dtype=np.int32)
+        values, found = d.lookup_many(keys, np.int64(-1))
+        np.testing.assert_array_equal(values, [11, 11, -1, 22, -1, 11])
+        np.testing.assert_array_equal(
+            found, [True, True, False, True, False, True])
+
+    def test_lookup_many_multiple_dicts(self):
+        da = Dict.empty(int32, float32)
+        db = Dict.empty(int64, int64)
+        da[1] = 1.25
+        da[2] = 2.5
+        db[10] = 100
+        keys_a = np.array([1, 3, 2], dtype=np.int32)
+        keys_b = np.array([10, 11], dtype=np.int64)
+        va, fa = da.lookup_many(keys_a, np.float32(-1.0))
+        vb, fb = db.lookup_many(keys_b, np.int64(-2))
+        self.assertEqual(va.dtype, np.float32)
+        self.assertEqual(vb.dtype, np.int64)
+        np.testing.assert_array_equal(va, np.array([1.25, -1., 2.5],
+                                                  dtype=np.float32))
+        np.testing.assert_array_equal(fa, [True, False, True])
+        np.testing.assert_array_equal(vb, [100, -2])
+        np.testing.assert_array_equal(fb, [True, False])
+        self.assertEqual((len(da), len(db)), (2, 1))
+
+    def test_lookup_many_python_njit_parity(self):
+        d = Dict.empty(int32, float64)
+        d[1] = 10.0
+        d[4] = 40.0
+
+        @njit
+        def fn(d, keys, default):
+            return d.lookup_many(keys, default)
+
+        for keys in (
+            np.array([1, 4, 7], dtype=np.int32),
+            np.array([7, 8, 9], dtype=np.int32),
+            np.array([1, 1, 4, 4, 7], dtype=np.int32),
+            np.arange(1, 8, dtype=np.int32)[::2],
+            np.arange(1, 10, dtype=np.int32).reshape(3, 3)[:, 0],
+            np.empty(0, dtype=np.int32),
+        ):
+            py_values, py_found = d.lookup_many(keys, -1.0)
+            jit_values, jit_found = fn(d, keys, -1.0)
+            np.testing.assert_array_equal(py_values, jit_values)
+            np.testing.assert_array_equal(py_found, jit_found)
+            self.assertEqual(py_values.dtype, jit_values.dtype)
+            self.assertEqual(py_found.dtype, jit_found.dtype)
+
+    def test_lookup_many_bad_args(self):
+        d = Dict.empty(int32, float64)
+        d[1] = 1.0
+
+        with self.assertRaisesRegex(TypingError, "typed dictionary"):
+            Dict().lookup_many(np.array([1], dtype=np.int32), 0)
+
+        msg = "expects 'keys' to be a 1-D numpy.ndarray"
+        with self.assertRaisesRegex(TypeError, msg):
+            d.lookup_many([1, 2], 0)
+        with self.assertRaisesRegex(TypeError, msg):
+            d.lookup_many(np.zeros((2, 2), dtype=np.int32), 0)
+
+        with self.assertRaisesRegex(
+                TypeError, "requires a scalar 'default'"):
+            d.lookup_many(np.array([1], dtype=np.int32), None)
+
+        with self.assertRaisesRegex(
+                TypingError, "cannot safely cast complex128 to float64"):
+            d.lookup_many(np.array([1], dtype=np.int32), 1j)
+
+        with self.assertRaisesRegex(
+                TypingError, "cannot safely cast float64 to int32"):
+            di = Dict.empty(int32, int64)
+            di.lookup_many(np.array([1.0]), 0)
+
+        ds = Dict.empty(int32, types.unicode_type)
+        ds[1] = "a"
+        with self.assertRaisesRegex(
+                TypingError,
+                "numeric scalars that can be stored in a NumPy array"):
+            ds.lookup_many(np.array([1], dtype=np.int32), "x")
+
+        dks = Dict.empty(types.unicode_type, types.int64)
+        dks["a"] = 1
+        with self.assertRaisesRegex(
+                TypingError, "supports only numeric scalar key types"):
+            dks.lookup_many(np.array(["a"]), 0)
 
 
 class DictIterableCtor:

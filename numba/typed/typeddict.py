@@ -2,6 +2,9 @@
 Python wrapper that connects CPython interpreter to the numba dictobject.
 """
 from collections.abc import MutableMapping, Iterable, Mapping
+
+import numpy as np
+
 from numba.core.types import DictType
 from numba.core.imputils import numba_typeref_ctor
 from numba import njit, typeof
@@ -72,6 +75,11 @@ def _popitem(d):
 @njit
 def _copy(d):
     return d.copy()
+
+
+@njit
+def _lookup_many(d, keys, default):
+    return d.lookup_many(keys, default)
 
 
 def _from_meminfo_ptr(ptr, dicttype):
@@ -236,6 +244,61 @@ class Dict(MutableMapping):
 
     def copy(self):
         return _copy(self)
+
+    def lookup_many(self, keys, default):
+        """Batch dictionary lookup.
+
+        Look up every element of the 1-D array *keys* and return a tuple
+        ``(values, found)`` where *values* is an array with the same length
+        as *keys* and *found* is a boolean array.  Entries missing from the
+        dictionary receive *default*; the dictionary is not modified.
+
+        The dtype of *values* is the value dtype of the dictionary; the
+        dictionary must therefore be typed and its values must be numeric
+        scalars.
+        """
+        if not self._typed:
+            raise errors.TypingError(
+                "dict.lookup_many(keys, default) requires a typed "
+                "dictionary; create one with "
+                "numba.typed.Dict.empty(key_type, value_type)")
+
+        if not isinstance(keys, np.ndarray):
+            raise TypeError(
+                "dict.lookup_many(keys, default) expects 'keys' to be a "
+                "1-D numpy.ndarray, got "
+                f"{type(keys).__name__}")
+        if keys.ndim != 1:
+            raise TypeError(
+                "dict.lookup_many(keys, default) expects 'keys' to be a "
+                f"1-D numpy.ndarray, got a {keys.ndim}-D array")
+
+        keyty = self._dict_type.key_type
+        valty = self._dict_type.value_type
+        if not isinstance(keyty, (types.Number, types.Boolean)):
+            raise errors.TypingError(
+                "dict.lookup_many(keys, default) supports only numeric "
+                "scalar key types, got dictionary key type "
+                f"{keyty}")
+        if not isinstance(valty, (types.Number, types.Boolean)):
+            raise errors.TypingError(
+                "dict.lookup_many(keys, default) supports only dictionaries "
+                "whose values are numeric scalars that can be stored in a "
+                f"NumPy array, got value type {valty}")
+
+        if default is None:
+            raise TypeError(
+                "dict.lookup_many(keys, default) requires a scalar "
+                "'default' value to use for missing keys")
+
+        from numba.np.numpy_support import from_dtype
+        from numba.typed.typedobjectutils import (
+            _sentry_safe_cast, _sentry_safe_cast_default)
+
+        _sentry_safe_cast(from_dtype(keys.dtype), keyty)
+        _sentry_safe_cast_default(typeof(default), valty)
+
+        return _lookup_many(self, keys, default)
 
 
 @overload_classmethod(types.DictType, 'empty')

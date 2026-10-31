@@ -5,6 +5,7 @@ import ctypes
 import operator
 from enum import IntEnum
 
+import numpy as np
 from llvmlite import ir
 
 from numba import _helperlib
@@ -34,6 +35,7 @@ from numba.core.imputils import impl_ret_borrowed, RefType
 from numba.core.errors import TypingError, LoweringError, NumbaTypeError
 from numba.core import typing
 from numba.typed.typedobjectutils import (_as_bytes, _cast, _nonoptional,
+                                          _sentry_safe_cast,
                                           _sentry_safe_cast_default,
                                           _get_incref_decref,
                                           _get_equal, _container_get_data,)
@@ -753,6 +755,60 @@ def impl_get(dct, key, default=None):
         if ix > DKIX.EMPTY:
             return val
         return default
+
+    return impl
+
+
+@overload_method(types.DictType, 'lookup_many')
+def impl_lookup_many(dct, keys, default=None):
+    if not isinstance(dct, types.DictType):
+        return
+
+    if not dct.is_precise():
+        raise TypingError(
+            "dict.lookup_many(keys, default) requires a precisely typed "
+            f"dictionary, got {dct}")
+
+    if not isinstance(keys, types.Array) or keys.ndim != 1:
+        raise TypingError(
+            "dict.lookup_many(keys, default) expects 'keys' to be a 1-D "
+            f"array, got {keys}")
+
+    keyty = dct.key_type
+    valty = dct.value_type
+    if not isinstance(keyty, (types.Number, types.Boolean)):
+        raise TypingError(
+            "dict.lookup_many(keys, default) supports only numeric scalar "
+            f"key types, got dictionary key type {keyty}")
+    if not isinstance(valty, (types.Number, types.Boolean)):
+        raise TypingError(
+            "dict.lookup_many(keys, default) supports only dictionaries "
+            "whose values are numeric scalars that can be stored in a NumPy "
+            f"array, got value type {valty}")
+
+    if default is None or isinstance(
+            default, (types.Omitted, types.NoneType)):
+        raise TypingError(
+            "dict.lookup_many(keys, default) requires a scalar 'default' "
+            "value to use for missing keys")
+
+    _sentry_safe_cast(keys.dtype, keyty)
+    _sentry_safe_cast_default(default, valty)
+
+    def impl(dct, keys, default=None):
+        n = keys.shape[0]
+        out = np.empty(n, dtype=valty)
+        found = np.zeros(n, dtype=np.bool_)
+        casted_default = _cast(default, valty)
+        for i in range(n):
+            castedkey = _cast(keys[i], keyty)
+            ix, val = _dict_lookup(dct, castedkey, hash(castedkey))
+            if ix > DKIX.EMPTY:
+                out[i] = _nonoptional(val)
+                found[i] = True
+            else:
+                out[i] = casted_default
+        return out, found
 
     return impl
 
