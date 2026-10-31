@@ -14,7 +14,7 @@ from numba.core.types import ListType
 from numba.core.imputils import numba_typeref_ctor
 from numba.core.dispatcher import Dispatcher
 from numba.core import types, config, cgutils
-from numba import njit, typeof
+from numba import jit, njit, typeof
 from numba.core.extending import (
     overload,
     box,
@@ -140,6 +140,11 @@ def _reverse(l):
 @njit
 def _copy(l):
     return l.copy()
+
+
+@jit
+def _runs(l):
+    return l.runs()
 
 
 @njit
@@ -411,6 +416,14 @@ class List(MutableSequence, pt.Generic[T]):
 
     def copy(self):
         return _copy(self)
+
+    def runs(self):
+        """Return ``(values, starts, counts)`` for runs of adjacent equal
+        values. Supports integer, boolean, float and unicode string items."""
+        if not self._typed:
+            raise TypeError("runs() requires a typed list, e.g. one created "
+                            "with List.empty_list(item_type)")
+        return _runs(self)
 
     def index(self, item: T, start: pt.Optional[int] = None,
               stop: pt.Optional[int] = None) -> int:

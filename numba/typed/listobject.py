@@ -1057,6 +1057,46 @@ def impl_count(l, item):
     return impl
 
 
+@overload_method(types.ListType, 'runs')
+def impl_runs(l):
+    if not isinstance(l, types.ListType):
+        return
+
+    itemty = l.item_type
+    if not isinstance(itemty, (types.Integer, types.Boolean, types.Float,
+                                types.UnicodeType)):
+        raise TypingError(
+            "List.runs() supports only integer, boolean, float and unicode "
+            "string item types, got item type: {}".format(itemty))
+
+    def impl(l):
+        values = new_list(itemty)
+        starts = new_list(INDEXTY)
+        counts = new_list(INDEXTY)
+        n = len(l)
+        if n > 0:
+            run_start = 0
+            run_value = l[0]
+            run_count = 1
+            for i in range(1, n):
+                value = l[i]
+                if value == run_value:
+                    run_count += 1
+                else:
+                    values.append(run_value)
+                    starts.append(run_start)
+                    counts.append(run_count)
+                    run_start = i
+                    run_value = value
+                    run_count = 1
+            values.append(run_value)
+            starts.append(run_start)
+            counts.append(run_count)
+        return values, starts, counts
+
+    return impl
+
+
 @overload_method(types.ListType, 'extend')
 def impl_extend(l, iterable):
     if not isinstance(l, types.ListType):

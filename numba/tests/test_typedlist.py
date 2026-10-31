@@ -6,6 +6,7 @@ from textwrap import dedent
 import numpy as np
 
 from numba import config
+from numba import jit
 from numba import njit
 from numba import int32, float32, prange, uint8
 from numba.core import types
@@ -24,6 +25,38 @@ def to_tl(l):
     for k in l:
         tl.append(k)
     return tl
+
+
+def _py_runs(seq):
+    values, starts, counts = [], [], []
+    n = len(seq)
+    if n:
+        start, prev, count = 0, seq[0], 1
+        for i in range(1, n):
+            cur = seq[i]
+            if cur == prev:
+                count += 1
+            else:
+                values.append(prev)
+                starts.append(start)
+                counts.append(count)
+                start, prev, count = i, cur, 1
+        values.append(prev)
+        starts.append(start)
+        counts.append(count)
+    return values, starts, counts
+
+
+@jit
+def _runs_jit(l):
+    return l.runs()
+
+
+def _typed_list(item_type, values):
+    l = List.empty_list(item_type)
+    for v in values:
+        l.append(v)
+    return l
 
 
 class TestTypedList(MemoryLeakMixin, TestCase):
@@ -1687,3 +1720,126 @@ class TestListFromIter(MemoryLeakMixin, TestCase):
             "List() takes no keyword arguments",
             str(raises.exception),
         )
+
+
+class TestTypedListRuns(MemoryLeakMixin, TestCase):
+
+    def _assert_eq_item(self, got, want):
+        if got != got and want != want:  # NaN == NaN is False
+            return
+        self.assertEqual(got, want)
+
+    def _check_runs(self, item_type, values):
+        tl = _typed_list(item_type, values)
+        exp_values, exp_starts, exp_counts = _py_runs(values)
+        snapshot = list(tl)
+
+        for mode, func in (("python", lambda l: l.runs()),
+                           ("nopython", _runs_jit),
+                           ("py_func", _runs_jit.py_func)):
+            v, s, c = func(tl)
+
+            self.assertEqual(len(tl), len(snapshot),
+                             msg="input modified in %s mode" % mode)
+            for got, want in zip(tl, snapshot):
+                self._assert_eq_item(got, want)
+
+            self.assertEqual(typeof(v), types.ListType(item_type),
+                             msg="%s value list type" % mode)
+            self.assertEqual(typeof(s), types.ListType(types.intp),
+                             msg="%s starts list type" % mode)
+            self.assertEqual(typeof(c), types.ListType(types.intp),
+                             msg="%s counts list type" % mode)
+
+            self.assertEqual(len(v), len(s))
+            self.assertEqual(len(v), len(c))
+            self.assertEqual(len(v), len(exp_values))
+            self.assertEqual(list(s), exp_starts)
+            self.assertEqual(list(c), exp_counts)
+            for got, want in zip(v, exp_values):
+                self._assert_eq_item(got, want)
+
+            if len(s):
+                self.assertEqual(s[0], 0)
+                for i in range(len(s) - 1):
+                    self.assertEqual(s[i] + c[i], s[i + 1])
+                self.assertEqual(s[-1] + c[-1], len(tl))
+                self.assertTrue(all(x >= 1 for x in c))
+
+    def test_runs_empty(self):
+        for item_type in (int32, types.int64, types.boolean, types.float64,
+                          types.unicode_type):
+            tl = List.empty_list(item_type)
+            for func in (lambda l: l.runs(), _runs_jit):
+                v, s, c = func(tl)
+                self.assertEqual((list(v), list(s), list(c)),
+                                 ([], [], []))
+                self.assertEqual(typeof(v), types.ListType(item_type))
+                self.assertEqual(typeof(s), types.ListType(types.intp))
+                self.assertEqual(typeof(c), types.ListType(types.intp))
+
+    def test_runs_single_element(self):
+        self._check_runs(int32, [42])
+        self._check_runs(types.boolean, [False])
+        self._check_runs(types.float32, [np.float32(1.25)])
+        self._check_runs(types.unicode_type, ["x"])
+
+    def test_runs_multiple_segments(self):
+        self._check_runs(types.int64,
+                         [1, 1, 2, 2, 2, 3, 1, 1, -5, -5])
+        self._check_runs(uint8, [0, 0, 0, 1, 1, 0, 255])
+        self._check_runs(types.boolean,
+                         [True, True, False, False, False, True])
+
+    def test_runs_float_nan_and_signed_zero(self):
+        nan = float("nan")
+        values = [1.5, 1.5, nan, nan, 2.0, -0.0, 0.0, 0.0, nan, 3.5]
+        self._check_runs(types.float64, values)
+        v, s, c = _typed_list(types.float64, values).runs()
+        nan_runs = [i for i, x in enumerate(v) if x != x]
+        self.assertEqual(nan_runs, [1, 2, 5])
+        self.assertEqual([c[i] for i in nan_runs], [1, 1, 1])
+        self.assertEqual((s[4], c[4]), (5, 3))
+
+    def test_runs_float32_nan(self):
+        nan = np.float32("nan")
+        self._check_runs(types.float32, [nan, np.float32(1.0), nan])
+
+    def test_runs_unicode(self):
+        self._check_runs(types.unicode_type,
+                         ["\u4f60\u597d", "\u4f60\u597d", "b", "cc", "cc",
+                          "cc", "", "", "a", "a", "\u4f60\u597d"])
+
+    def test_runs_value_type_preserved(self):
+        v, s, c = _typed_list(int32, [7, 7, 8]).runs()
+        self.assertEqual(typeof(v), types.ListType(int32))
+        self.assertEqual(typeof(s), types.ListType(types.intp))
+        self.assertEqual(typeof(c), types.ListType(types.intp))
+
+    def test_runs_dispatcher_reused_for_various_lengths(self):
+        for n in (0, 1, 2, 3, 8, 100, 257):
+            values = [i // 5 for i in range(n)]
+            v, s, c = _runs_jit(_typed_list(types.int64, values))
+            exp_values, exp_starts, exp_counts = _py_runs(values)
+            self.assertEqual(list(v), exp_values)
+            self.assertEqual(list(s), exp_starts)
+            self.assertEqual(list(c), exp_counts)
+
+    def test_runs_unsupported_item_type(self):
+        cplx = _typed_list(types.complex128, [1.0j, 1.0j, 2.0j])
+        with self.assertRaises(TypingError) as raises:
+            _runs_jit(cplx)
+        self.assertIn("List.runs() supports only", str(raises.exception))
+        with self.assertRaises(TypingError):
+            cplx.runs()
+
+        nested = List.empty_list(types.ListType(int32))
+        nested.append(to_tl([1, 1]))
+        with self.assertRaises(TypingError) as raises:
+            _runs_jit(nested)
+        self.assertIn("List.runs() supports only", str(raises.exception))
+
+    def test_runs_untyped_list(self):
+        with self.assertRaises(TypeError) as raises:
+            List().runs()
+        self.assertIn("typed list", str(raises.exception))
